@@ -12,8 +12,8 @@ sys.path.append(os.path.join(file_path, "grid-graph/python/bin"))
 sys.path.append(os.path.join(file_path, "parallel-cut-pursuit/python/wrappers"))
 sys.path.append(os.path.join(file_path, "multilabel-potrace/python/bin"))
 
-from grid_graph import grid_to_graph, edge_list_to_forward_star
-from cp_kmpp_d0_dist import cp_kmpp_d0_dist
+from grid_graph import grid_to_graph
+from cp_d0_dist import cp_d0_dist
 from multilabel_potrace_svg import multilabel_potrace_svg
 
 
@@ -36,34 +36,41 @@ def char2col(c):
 def main():
     parser = argparse.ArgumentParser(description='IMG TO VECTOR')
     # path and filenames
-    parser.add_argument('-f', '--file', default='lola.jpeg', required=False, help='Input file name')
-    parser.add_argument('-p', '--out_path', default='', help='Path of svg outputfile default = empty : inputfile.svg ')
-    parser.add_argument('-o', '--out_size', type=float, default=500, help='Size of svg outputfile')
+    parser.add_argument('-f', '--file', default='lola.jpeg', required=False,
+                        help='Input file name.')
+    parser.add_argument('-o', '--outfile', default='',
+                        help='Path of SVG outputfile. Default: <input>.svg')
     #cosmetic
-    parser.add_argument('-lc', '--line_color', default='', help='Color of contour, default = none. supported (r,g,b,k,w), or a char triplet')
     parser.add_argument('-lw', '--line_width', default=1, type=int,
-                        help='Width of contour in pixels. Default: 1')
+                        help='Width of contours in pixels. Set to 0 for no ' \
+                             'contour. Default: 1')
+    parser.add_argument('-lc', '--line_color', default='k',
+                        help='Color of contour. Supported: r,g,b,k,w, or a ' \
+                            'char triplet. Defaut: k.')
     # optimization parameters
     parser.add_argument('-a', '--apply', default='',
-                        help='Function to apply before partition: sqrt, log,none (default)')
+                        help='Function to apply before partition: sqrt, log,' \
+                             ' none (default).')
     parser.add_argument('-r', '--reg', default=1.0, type=float,
-                        help='Regularization strength: the higher the fewer components. Default = 1.0.')
+                        help='Regularization strength: the higher the fewer' \
+                             ' components. Default: 1.0.')
+    parser.add_argument('-m', '--min_comp_size', default=10, type=int,
+                        help='Minimum size of components (in pixels). ' \
+                             'Default: 10')
     parser.add_argument('-s', '--smooth', default=1.0, type=float,
-                        help='Smoothing term. 0  = polygonal, >0 cubic Bezier curves. Default = 1.0')
+                        help='Smoothing term. [0, 4/3]; 0 = polygonal, ' \
+                             '> 0 cubic Bezier curves. Default: 1.0')
     parser.add_argument('-lt', '--line_tolerance', default=1.0, type=float,
-                        help='how far are lines allowed to deviate from the borders')
+                        help='How far are lines allowed to deviate from the ' \
+                             'borders (in pixels). Default: 1.0.')
     parser.add_argument('-ct', '--curve_tolerance', default=0.2, type=float,
-                        help='max difference area ratio diff between original and simplified polygons. Default=0.2')
+                        help='Max difference area ratio diff between ' \
+                             'original and simplified polygons. Default: 0.2')
 
     args = parser.parse_args()
 
-    if len(args.out_path) > 3 and args.out_path[-4:] != '.svg':
-        args.out_path = args.out_path + '.svg'
-
-    try:
-        args.out_size = [float(args.out_size), float(args.out_size)]
-    except ValueError:
-        args.out_size = ast.literal_eval(args.out_size)
+    if len(args.outfile) > 3 and args.outfile[-4:] != '.svg':
+        args.outfile = args.outfile + '.svg'
 
     # input raster
     filename, file_extension = os.path.splitext(args.file)
@@ -71,7 +78,6 @@ def main():
         img = mpimg.imread(args.file).astype('f4')
         if file_extension == '.png':
             img = img[:, :, :3]
-        print(img.max())
         if img.max() > 1:
             img = img / 255.0
     elif file_extension == '.npy':
@@ -96,23 +102,28 @@ def main():
     args.col = img.shape[1]
     args.n_chan = img.shape[-1] if len(img.shape) > 2 else 1
     args.n_ver = args.lin * args.col
-    print('Reading image of size %d by %d with %d channels' % (args.lin, args.col, args.n_chan))
+    print('Loaded image of size %d by %d with %d channels' %
+            (args.lin, args.col, args.n_chan))
 
     # compute grid graph
     shape = np.array([args.lin, args.col], dtype='uint32')
     first_edge, adj_vertices, connectivities = grid_to_graph(shape, 2,
         compute_connectivities=True)
     # edge weights
-    edg_weights = np.ones(connectivities.shape, dtype=img.dtype)
-    edg_weights[connectivities == 2] = 1 / np.sqrt(2)
+    edge_weights = np.ones(connectivities.shape, dtype=img.dtype)
+    edge_weights[connectivities == 2] = 1 / np.sqrt(2)
+    del connectivities
 
     # cut pursuit
-    reg_strength = args.reg * np.std(img) ** 2
+    reg_strength = args.reg * np.var(img)
 
-    comp, rX, dump = cp_kmpp_d0_dist(1,
-        img.reshape((args.n_ver, args.n_chan)).T, first_edge, adj_vertices,
-        edge_weights=reg_strength * edg_weights, cp_it_max=10,
-        cp_dif_tol=1e-2, max_num_threads=0, balance_parallel_split=True)
+    img = np.asfortranarray(img.reshape((args.n_ver, args.n_chan)).T)
+
+    comp, rX = cp_d0_dist(1,
+            img, first_edge, adj_vertices,
+            edge_weights=reg_strength * edge_weights, cp_it_max=10,
+            min_comp_weight=args.min_comp_size, cp_dif_tol=1e-2,
+            max_num_threads=0, balance_parallel_split=True)
 
     print('Partition done.')
 
@@ -122,8 +133,8 @@ def main():
         rX = rX ** 2
 
     # format output
-    output_path = args.out_path if len(args.out_path) > 0 \
-                                else filename + '.svg'
+    output_path = args.outfile if len(args.outfile) > 0 \
+                               else filename + '.svg'
     if len(args.line_color) == 0:
         line_color = None
     elif len(args.line_color) == 1:
@@ -134,7 +145,7 @@ def main():
                 .astype('uint8')
         except SyntaxError:
             print("line_color should be either empty, r,g,b,k,w or a char" \
-                " triplet.")
+                  " triplet.")
 
     multilabel_potrace_svg(np.resize(comp, (args.lin, args.col)), output_path,
         straight_line_tol=args.line_tolerance, smoothing=args.smooth,
